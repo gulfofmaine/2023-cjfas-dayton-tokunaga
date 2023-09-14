@@ -1,0 +1,1072 @@
+---
+title: Latent Class Profit Frontier Analysis (using sfaR package)
+author: Kanae Tokunaga
+date: 1/26/2021
+output: github_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+Estimation using self reported revenue and catch data
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(sfaR)
+library(ggplot2)
+library(corrplot)
+library(wesanderson)
+library(gmRi)
+library(lmtest)
+library(stargazer)
+library(broom)
+source("coef.R")
+library(rgdal)
+library(maptools)
+library(rgeos)
+library(ggradar)
+library(patchwork)
+
+theme_set(theme_bw())
+```
+
+# Read data for the one step approach
+
+```{r}
+dt.input <- read_csv("data/input_data_20220203_selfreported.csv") %>% 
+  mutate(daily.wage = daily.wage + 1) %>% 
+  mutate(profit = (min(profit)-1)*(-1)+profit) %>% 
+  mutate(active = active*3) %>% 
+  arrange(profit) 
+
+
+dt.profit.lc <- dt.input %>% 
+  mutate_at(c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip"), list(scale)) %>% 
+  mutate_at(c("profit",  "fuel.price", "bait.price", "daily.wage"), .funs = list(norm = ~./mean.price*100)) %>% 
+  mutate_at(c("fuel.price_norm", "bait.price_norm", "daily.wage_norm"), .funs = list(log = ~log(.))) %>% 
+  mutate(profit_norm_log = log(profit_norm)) %>% 
+  mutate_at(c("fuel.price_norm_log","bait.price_norm_log", "daily.wage_norm_log"), .funs = list(half = ~.^2*1/2)) 
+```
+
+## Diagnostic figures
+
+```{r eval=FALSE, include=FALSE}
+dt.profit.lc %>% 
+  select(mdid, profit_norm_log, bait.price_norm_log, fuel.price_norm_log, daily.wage_norm_log,
+         bait.price_norm_log_half, fuel.price_norm_log_half, daily.wage_norm_log_half) %>% 
+  gather(variables, values, profit_norm_log:daily.wage_norm_log_half) %>% 
+  ggplot(aes(values)) + geom_histogram() + facet_wrap(variables~., ncol = 4, scales = "free")
+
+
+dt.profit.lc %>% 
+  select(mdid, vessel.age:traps.per.line) %>% 
+  gather(inputvars, values, vessel.age:traps.per.line) %>% 
+  ggplot(aes(values)) + geom_histogram() + facet_wrap(inputvars ~., ncol = 4, scales = "free")
+
+dt.input %>% 
+  select(-mdid) %>% 
+  select(profit, bait.price, fuel.price, daily.wage, resource.stock, dependence, experience,
+         vessel.age:traps.per.line) %>% 
+  filter(complete.cases(.))%>% 
+  cor() %>% 
+  corrplot(., method = "number")
+
+dt.profit.lc %>% 
+  select(mdid, profit_norm_log, fuel.price_norm_log:daily.wage_norm_log,resource.stock:active ) %>% 
+  gather(inputvars, values, profit_norm_log:active) %>% 
+  ggplot(aes(values)) + geom_histogram() + facet_wrap(inputvars ~., ncol = 4, scales = "free")
+
+dt.profit.lc %>% 
+  select(-mdid) %>% 
+  select(profit, bait.price, fuel.price, daily.wage, resource.stock, dependence, experience,
+         vessel.age:active) %>% 
+  filter(complete.cases(.))%>% 
+  cor() %>% 
+  corrplot(., method = "color")
+
+hist(dt.profit.lc$mean.price)
+```
+
+# Half normal model
+
+```{r}
+mod.profit.half2 <- profit_norm_log ~  bait.price_norm_log + fuel.price_norm_log + daily.wage_norm_log +
+  bait.price_norm_log_half + fuel.price_norm_log_half + daily.wage_norm_log_half + 
+  bait.price_norm_log:fuel.price_norm_log + 
+  bait.price_norm_log:daily.wage_norm_log + 
+  fuel.price_norm_log:daily.wage_norm_log 
+```
+
+Specification with one-sided error (Reference for when LCA is not
+converging:
+<https://cran.r-project.org/web/packages/lcmm/vignettes/usual_problems.html>)
+
+```{r}
+set.seed(1)
+
+restricted.mod.c1.onesided <- sfacross(formula = mod.profit.half2,
+                uhet = ~resource.stock  + dependence  + active + experience,
+                udist = "hnormal", data = dt.profit.lc, method = "mla", itermax = 2000) 
+
+summary(restricted.mod.c1.onesided)
+
+
+restricted.mod.c2.onesided <- lcmcross(formula = mod.profit.half2,
+                 uhet = ~resource.stock + dependence + active + experience,
+                thet = ~vessel.ft + engine.hp + vessel.age + engine.age + steam.time+ soak.days + num.crew + traps.per.line + traps.hauled.per.trip,
+                lcmClasses = 2, data = dt.profit.lc, method = "mla", itermax = 2000, initStart = FALSE, initAlg = "nlminb", initIter = 100)
+
+summary(restricted.mod.c2.onesided)
+
+restricted.mod.c3.onesided <- lcmcross(formula = mod.profit.half2,
+                 uhet = ~resource.stock + dependence + active  + experience ,
+                thet = ~ vessel.ft + engine.hp + vessel.age + engine.age + steam.time+ soak.days + num.crew + traps.per.line + traps.hauled.per.trip,
+                lcmClasses = 3, data = dt.profit.lc, method = "mla", itermax=2000, initStart = FALSE, initAlg = "nlminb", initIter = 100, tol =1e-12)
+
+summary(restricted.mod.c3.onesided)
+
+
+restricted.mod.c4.onesided <- lcmcross(formula = mod.profit.half2,
+                 uhet = ~resource.stock + dependence + active + experience,
+                thet = ~vessel.ft + engine.hp + vessel.age + engine.age+ steam.time+ soak.days + num.crew +traps.per.line  + traps.hauled.per.trip,
+                lcmClasses = 4, data = dt.profit.lc, method = "mla", itermax = 8000, initStart = FALSE, initAlg = "nlminb", initIter = 100, hessianType = 3, tol =2e-12)
+
+summary(restricted.mod.c4.onesided)
+
+
+restricted.mod.c5.onesided <- lcmcross(formula = mod.profit.half2,
+                 uhet = ~resource.stock + dependence + active + experience,
+                thet = ~vessel.ft + engine.hp + vessel.age + engine.age+ steam.time+ soak.days + num.crew +traps.per.line  + traps.hauled.per.trip,
+                lcmClasses = 5, data = dt.profit.lc, method = "mla", itermax = 8000, initStart = FALSE, initAlg = "nlminb", initIter = 100, hessianType = 3, tol =2e-12)
+
+summary(restricted.mod.c5.onesided)
+
+```
+
+```{r}
+ic.restricted.onesided <- tibble(class = 1:5, 
+                        BIC = c(summary(restricted.mod.c1.onesided)$BIC, summary(restricted.mod.c2.onesided)$BIC, summary(restricted.mod.c3.onesided)$BIC, summary(restricted.mod.c4.onesided)$BIC, summary(restricted.mod.c5.onesided)$BIC),
+                        AIC = c(summary(restricted.mod.c1.onesided)$AIC, summary(restricted.mod.c2.onesided)$AIC,summary(restricted.mod.c3.onesided)$AIC,
+                                summary(restricted.mod.c4.onesided)$AIC, summary(restricted.mod.c5.onesided)$AIC),
+                        HQIC = c(summary(restricted.mod.c1.onesided)$HQIC, summary(restricted.mod.c2.onesided)$HQIC,summary(restricted.mod.c3.onesided)$HQIC, summary(restricted.mod.c4.onesided)$HQIC, summary(restricted.mod.c5.onesided)$HQIC),
+                        Model = rep("One-sided error", 5))
+
+green4 <- pchisq(-2*(logLik(restricted.mod.c4.onesided)[1] - logLik(restricted.mod.c5.onesided)[1]), lower.tail = FALSE, df = (logLik(restricted.mod.c5.onesided)[3] - logLik(restricted.mod.c4.onesided)[3]))
+
+green3 <- pchisq(-2*(logLik(restricted.mod.c3.onesided)[1] - logLik(restricted.mod.c4.onesided)[1]), lower.tail = FALSE, df = (logLik(restricted.mod.c4.onesided)[3] - logLik(restricted.mod.c3.onesided)[3]))
+
+green2 <- pchisq(-2*(logLik(restricted.mod.c2.onesided)[1] - logLik(restricted.mod.c3.onesided)[1]), lower.tail = FALSE, df = (logLik(restricted.mod.c3.onesided)[3] - logLik(restricted.mod.c2.onesided)[3]))
+
+
+green1 <- pchisq(-2*(logLik(restricted.mod.c1.onesided)[1] - logLik(restricted.mod.c2.onesided)[1]), lower.tail = FALSE, df = (logLik(restricted.mod.c2.onesided)[3] - logLik(restricted.mod.c1.onesided)[3]))
+
+
+greene <- tibble(test = c (NA, green4, green3, green2, green1))
+
+ic.restricted.onesided %>% 
+  select(-Model) %>% 
+  arrange(desc(class)) %>% 
+  bind_cols(., greene) %>% 
+  write_csv("out/select_class_number.csv")
+  
+
+```
+
+> > Log likelihoood ratio test (work down from class = 5 --\> 4 --\> 3
+> > --\> 2 --\> 1, c.f. Greene) reference:
+> > <https://api.rpubs.com/tomanderson_34/lrt> test statistic =
+> > -2\*(logLik(nested)[1] - logLik(complex)[1]) degree of freedom =
+> > logLik(complex)[3] - loLik(nested)[3] p.val = pchisq(teststatistic,
+> > df = degree of freedom, lower.tail = FALSE) Suggesting 5 classes
+
+## Save coefficients
+
+```{r}
+sum.c5.one <- summary(restricted.mod.c5.onesided)
+sum.c5.one
+
+sum.c5.one
+
+coef.c1.one <- data.frame(coef(summary(restricted.mod.c1.onesided))) %>% 
+  rownames_to_column(., "variables") %>% 
+  mutate(model = "class-1")
+coef.c2.one <- data.frame(coef(summary(restricted.mod.c2.onesided))) %>% 
+  rownames_to_column(., "variables") %>% 
+  mutate(model = "class-2")
+coef.c3.one <- data.frame(coef(summary(restricted.mod.c3.onesided))) %>% 
+  rownames_to_column(., "variables") %>% 
+  mutate(model = "class-3")
+coef.c4.one <- data.frame(coef(summary(restricted.mod.c4.onesided))) %>% 
+  rownames_to_column(., "variables") %>% 
+  mutate(model = "class-4")
+coef.c5.one <- data.frame(coef(summary(restricted.mod.c5.onesided))) %>% 
+  rownames_to_column(., "variables") %>% 
+  mutate(model = "class-5")
+
+eff.c1.one <- efficiencies(restricted.mod.c1.onesided) %>% 
+  mutate(model = "class-1")
+eff.c2.one <- efficiencies(restricted.mod.c2.onesided) %>% 
+  mutate(model = "class-2")
+eff.c3.one <- efficiencies(restricted.mod.c3.onesided) %>% 
+  mutate(model = "class-3")
+eff.c4.one <- efficiencies(restricted.mod.c4.onesided) %>% 
+  mutate(model = "class-4")
+eff.c5.one <- efficiencies(restricted.mod.c5.onesided) %>% 
+  mutate(model = "class-5")
+```
+
+### Calculuate number of individals per group
+
+```{r}
+eff.c5.one %>% 
+  count(Group_c)
+```
+
+### Format coefficients
+
+```{r}
+coef.c5.one.formatted <- coef.c5.one %>% 
+  mutate(stars = ifelse(Pr...z..<=0.1 & Pr...z.. > 0.05, "*", NA)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.05 & Pr...z.. > 0.01, "**", stars)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.01, "***", stars)) %>% 
+  mutate(class = c(rep(1,16), rep(2,16), rep(3, 16), rep(4,16),  rep(5,16), rep(0, 40)))
+
+```
+
+## Calculate mean efficiency for each class
+
+```{r eval=FALSE, include=FALSE}
+eff.c5.one %>% 
+  arrange(teJLMS_c)
+
+p.eff.c5.one <- eff.c5.one %>% 
+  select(Group_c, teJLMS_c) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  arrange(Group_c, conditional_efficiency) %>% 
+  group_by(Group_c) %>% 
+  mutate(num = row_number()) %>% 
+  ggplot(aes(num, conditional_efficiency)) + geom_point() + facet_wrap(.~Group_c, scales = "free") +
+  ylim(0,1) +
+  labs(x = "", y = "Conditional efficiency")
+
+p.eff.c5.one
+
+p.eff.c5.one_flipped <- eff.c5.one %>% 
+  select(Group_c, teJLMS_c) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  arrange(Group_c, desc(conditional_efficiency)) %>% 
+  group_by(Group_c) %>% 
+  mutate(num = row_number()) %>% 
+  ggplot(aes(num, conditional_efficiency)) + geom_point() + facet_wrap(.~Group_c, scales = "free") +
+  ylim(0,1) +
+  labs(x = "", y = "Conditional efficiency")
+
+p.eff.c5.one_flipped
+
+mean.eff.c5.one <- eff.c5.one %>% 
+  select(Group_c, teJLMS_c) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  arrange(Group_c, conditional_efficiency) %>% 
+  group_by(Group_c) %>% 
+  summarise(obs_by_class = n(),
+            mean_conditional_efficiency_by_class = mean(conditional_efficiency),
+            sd_conditional_efficiency_by_class = sd(conditional_efficiency),
+            se_conditional_efficiency_by_class = sd(conditional_efficiency)/sqrt(n())) 
+
+mean.eff.c5.one
+
+```
+
+# Efficiency by zone
+
+```{r}
+dt.input %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone, Group_c) %>% 
+  summarise(mean_conditional_efficiency = mean(conditional_efficiency)) %>% 
+  spread(., Group_c, mean_conditional_efficiency)
+
+dt.input %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone) %>% 
+  summarise(mean_conditional_efficiency = mean(conditional_efficiency)) 
+
+
+```
+
+```{r}
+dt.input %>% 
+    select(mdid,profit, mean.price, bait.price, fuel.price, daily.wage, resource.stock, dependence, active, experience,
+         vessel.age:traps.per.line, primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1:2]) %>% 
+  mutate(check = ifelse(log(profit/mean.price*100)==profit_norm_log, "ok", "ng")) %>% 
+  bind_cols(eff.c5.one) %>% 
+  select(Group_c, vessel.age:traps.per.line, -traps.hauled.per.trip) %>% 
+  gather(production, value, c(vessel.age:traps.per.line)) %>% 
+  mutate(Group_c = as.factor(Group_c)) %>% 
+  group_by(Group_c, production) %>% 
+  summarise(mean = mean(value)) %>% 
+  spread(Group_c, mean) #%>% 
+  #write_csv("out/mean_unscaled_production_by_class_revised_sr.csv")
+```
+
+# Manuscript figures
+
+## Mean tech characteristics figures - original
+
+```{r}
+p.mean.tech.lc5 <- restricted.mod.c5.onesided$dataTable %>% 
+  select(c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  bind_cols(eff.c5.one) %>% 
+  select(Group_c, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  arrange(Group_c) %>% 
+  gather(production, value, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(Group_c = as.factor(Group_c)) %>% 
+  group_by(Group_c, production) %>% 
+  summarise(mean = mean(value)) %>% 
+  mutate(production = fct_relevel(production,"vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time", "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(production = recode(production, vessel.age = "Vessel age", engine.age = "Engine age", vessel.ft = "Vessel length", engine.hp = "Engine power", 
+                             num.crew = "No. of crews", steam.time = "Steam time", 
+                             traps.per.line = "No. traps per line",
+                             traps.hauled.per.trip = "Traps hauled")) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ggplot(aes(production, mean, group = as.factor(Group_c_lab), color = as.factor(Group_c_lab), shape = as.factor(Group_c_lab))) +
+  geom_line() +
+  scale_color_gmri()+
+  geom_point(aes(shape = Group_c_lab), size = 2)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.title = element_blank())+
+  labs( y = "Scaled mean values by class", x = "Manifest technical & operational characteristics")
+
+p.mean.tech.lc5
+
+restricted.mod.c5.onesided$dataTable %>% 
+  select(c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  bind_cols(eff.c5.one) %>% 
+  select(Group_c, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  arrange(Group_c) %>% 
+  gather(production, value, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(Group_c = as.factor(Group_c)) %>% 
+  group_by(Group_c, production) %>% 
+  summarise(mean = mean(value),
+            se = sd(value)/sqrt(n())) %>% 
+  mutate(production = fct_relevel(production,"vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time", "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(production = recode(production, vessel.age = "Vessel age", engine.age = "Engine age", vessel.ft = "Vessel length", engine.hp = "Engine power", soak.days = "Soak days",
+                             num.crew = "No. of crews", steam.time = "Steam time", 
+                             traps.per.line = "No. traps per line",
+                             traps.hauled.per.trip = "Traps hauled")) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ggplot(aes(production, mean, group = as.factor(Group_c_lab), color = as.factor(Group_c_lab), shape = as.factor(Group_c_lab))) +
+  geom_line() +
+  scale_color_gmri()+
+  geom_errorbar(aes(min = mean -se, max = mean + se), width = .1, alpha = 0.25)+
+  geom_point(aes(shape = Group_c_lab), size = 2)+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.title = element_blank())+
+  labs( y = "Scaled mean values by class", x = "Manifest operational characteristics")
+
+dt.input %>% 
+   select(c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  bind_cols(eff.c5.one) %>% 
+  select(Group_c, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  gather(production, value, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(Group_c = as.factor(Group_c)) %>% 
+  group_by(Group_c, production) %>% 
+  summarise(mean = mean(value)) %>% 
+  spread(production, mean) 
+```
+
+## Mean tech characteristics figures -- Radar chart
+
+```{r}
+mean.tech.scaled <- restricted.mod.c5.onesided$dataTable %>% 
+  select(c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  bind_cols(eff.c5.one) %>% 
+  select(Group_c, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  arrange(Group_c) %>% 
+  gather(production, value, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(Group_c = as.factor(Group_c)) %>% 
+  group_by(Group_c, production) %>% 
+  summarise(mean = mean(value)) %>% 
+  mutate(production = fct_relevel(production,"vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time", "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(production = recode(production, vessel.age = "Vessel age", engine.age = "Engine age", vessel.ft = "Vessel length", engine.hp = "Engine power",
+                             num.crew = "#Crew", steam.time = "Steam time", soak.days = "Soak days",
+                             traps.per.line = "#Traps per line",
+                             traps.hauled.per.trip = "Traps hauled")) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  spread(production, mean) %>% 
+  ungroup() %>% 
+  select(Group_c_lab:`Traps hauled`)
+
+p.radar.c1 <- ggradar(
+  mean.tech.scaled[1,], 
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 2,
+  group.colours = c("#e69f00"), 
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  grid.label.size = 3,
+  axis.label.size = 3,
+  fill = TRUE,
+  fill.alpha = 0.5,
+  plot.extent.x.sf = 1.2,
+  plot.extent.y.sf = 1.4) +
+  labs(title = "Class 1") + 
+ theme(plot.title = element_text(size=10))
+
+p.radar.c2 <- ggradar(
+  mean.tech.scaled[2,], 
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 2,
+  group.colours = c("#009e73"), 
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  grid.label.size = 3,
+  axis.label.size = 3,
+  fill = TRUE,
+  fill.alpha = 0.5,
+  plot.extent.x.sf = 1.2,
+  plot.extent.y.sf = 1.4) +
+  labs(title = "Class 2") + 
+ theme(plot.title = element_text(size=10))
+
+
+p.radar.c3 <- ggradar(
+  mean.tech.scaled[3,], 
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 2,
+  group.colours = c("#f0e442"), 
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  grid.label.size = 3,
+  axis.label.size = 3,
+  fill = TRUE,
+  fill.alpha = 0.5,
+  plot.extent.x.sf = 1.2,
+  plot.extent.y.sf = 1.4) +
+  labs(title = "Class 3") + 
+ theme(plot.title = element_text(size=10))
+
+
+p.radar.c4 <- ggradar(
+  mean.tech.scaled[4,], 
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 2,
+  group.colours = c("#0072b2"), 
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  grid.label.size = 3,
+  axis.label.size = 3,
+  fill = TRUE,
+  fill.alpha = 0.5,
+  plot.extent.x.sf = 1.2,
+  plot.extent.y.sf = 1.4) +
+  labs(title = "Class 4") + 
+ theme(plot.title = element_text(size=10))
+
+
+p.radar.c5 <- ggradar(
+  mean.tech.scaled[5,], 
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 2,
+  group.colours = c("#d55e00"), 
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+   grid.label.size = 3,
+  axis.label.size = 3,
+  fill = TRUE,
+  fill.alpha = 0.5,
+  plot.extent.x.sf = 1.2,
+  plot.extent.y.sf = 1.4) +
+  labs(title = "Class 5") + 
+ theme(plot.title = element_text(size=10))
+
+
+p.radar.sep <- p.radar.c1 + p.radar.c2 + p.radar.c3 + p.radar.c4 + p.radar.c5 + plot_layout(ncol=3)
+
+p.radar.all <- ggradar(
+  mean.tech.scaled[1:5,],
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 1.5,
+  group.colours = c("#e69f00", "#009e73", "#f0e442", "#0072b2", "#d55e00"), 
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  grid.label.size = 3,
+  axis.label.size = 5,
+  fill = TRUE,
+  fill.alpha = 0.2,
+  plot.extent.x.sf = 1.2,
+  plot.extent.y.sf = 1.4) +
+  labs(title = "Technical & Operational Characteristics") + 
+ theme(plot.title = element_text(size=18))
+
+p.radar.3and4 <- ggradar(
+  mean.tech.scaled[3:4,],
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 1.5,
+  group.colours = c("#f0e442", "#0072b2"), 
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  grid.label.size = 3,
+  axis.label.size = 5,
+  fill = TRUE,
+  fill.alpha = 0.2,
+  plot.extent.x.sf = 1.2,
+  plot.extent.y.sf = 1.4) +
+  labs(title = "Technical & Operational Characteristics") + 
+ theme(plot.title = element_text(size=18))
+
+
+```
+
+## Efficiency
+```{r}
+p.efficiency <-mean.eff.c5.one %>% 
+  mutate(Group_c = as.factor(Group_c)) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ggplot(aes(Group_c_lab, mean_conditional_efficiency_by_class, color = Group_c_lab)) + 
+  geom_errorbar(aes(min = mean_conditional_efficiency_by_class - se_conditional_efficiency_by_class, 
+                    max = mean_conditional_efficiency_by_class + se_conditional_efficiency_by_class), color = "black", width = .1)+
+ #  scale_color_manual(values = wes_palette("Darjeeling1", n = 5))+
+  scale_color_gmri()+
+  geom_point(size = 2.5) +
+  labs(x = "", y="Mean Conditional Efficiency") +
+  theme(legend.position = "none")
+
+p.efficiency2 <- eff.c5.one %>% 
+  select(Group_c, teJLMS_c) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  arrange(Group_c) %>% 
+ # mutate(Group_c = as.factor(Group_c)) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  #mutate(Group_c = fct_relevel(Group_c, "4", "3", "5", "1", "2")) %>% 
+  ggplot(aes(Group_c_lab, conditional_efficiency, fill = Group_c_lab)) + geom_boxplot() +
+  labs(x = "", y="Mean Conditional Efficiency")+
+  theme(legend.title = element_blank())
+
+dt.se.all <- mean.eff.c5.one %>% 
+  mutate(Group_c = as.factor(Group_c)) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  rename(conditional_efficiency = mean_conditional_efficiency_by_class,
+         se = se_conditional_efficiency_by_class)
+
+p.jitter.class <- eff.c5.one %>%  
+  select(Group_c, teJLMS_c) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  arrange(Group_c) %>% 
+ # mutate(Group_c = as.factor(Group_c)) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  #mutate(Group_c = fct_relevel(Group_c, "4", "3", "5", "1", "2")) %>% 
+  ggplot(aes(Group_c_lab, conditional_efficiency)) + 
+  geom_jitter(position = position_jitter(0.2), color = "darkgray", shape =1) +   
+  geom_pointrange(aes(ymin = conditional_efficiency-se, ymax = conditional_efficiency+se, color = Group_c_lab),size =0.5, data = dt.se.all) +
+  scale_color_gmri()+
+  labs(x = "", y="Mean Conditional Efficiency")+
+  theme(legend.title = element_blank())
+
+p.efficiency
+
+p.efficiency2
+  
+  
+```
+
+## By Zone
+```{r}
+p.zone.class <- dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone) %>% 
+  count(primary.zone, Group_c) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ggplot(aes(Group_c_lab, n, fill = Group_c_lab)) + geom_bar(stat="identity") + 
+  labs(x="", y = "Number of observations") +
+  theme(legend.position = "none")
+
+p.zone.class
+
+
+dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ggplot(aes(factor(Group_c_lab), fill = factor(Group_c_lab))) +
+  geom_bar() +
+  scale_fill_gmri()+
+  labs(x="", y = "Number of observations") +
+  theme(legend.position = "none") +
+  facet_wrap(.~ primary.zone)
+
+
+p.zone.class2 <- dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  group_by(primary.zone, Group_c_lab) %>% 
+  summarise(count = n()) %>% 
+  mutate(perc = count/sum(count)) %>%
+  mutate(lab = paste(round(perc*100, digits =0),"% (", count, ")")) %>% 
+  ggplot(aes(x = factor(primary.zone), y = perc*100, fill = factor(Group_c_lab), label = lab)) +
+  geom_bar(stat="identity", width = 0.7) +
+  labs(x = "", y = "Class composition by management zone", fill = "Group_c_lab") +
+  scale_fill_manual(values = alpha(c("#e69f00", "#009e73", "#f0e442", "#0072b2", "#d55e00"),  0.8))+
+  geom_text(size = 4, position = position_stack(vjust = 0.5), color = "black") +
+  theme(legend.position = "top") +
+  theme(legend.title = element_blank())
+  
+
+
+
+p.effbyzone <- dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ggplot(aes(Group_c_lab, conditional_efficiency, fill = Group_c_lab)) + geom_boxplot() +
+   scale_fill_manual(values = wes_palette("Darjeeling1", n = 5))+
+  labs(x = "", y="Mean Conditional Efficiency By Management Zone")+
+  theme(legend.title = element_blank()) +
+  theme(legend.position = "none") +
+  facet_wrap(.~ primary.zone)
+p.effbyzone
+
+dt.se <- dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid,primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  select(mdid, primary.zone,Group_c_lab, conditional_efficiency) %>% 
+  group_by(primary.zone, Group_c_lab) %>% 
+  summarise(mean = mean(conditional_efficiency, an.rm=TRUE),
+             se = sd(conditional_efficiency, na.rm = TRUE)/sqrt(n())) %>% 
+  rename(conditional_efficiency = mean)
+
+
+
+p.jitter.zone <- dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ggplot(aes(Group_c_lab, conditional_efficiency)) + 
+  geom_jitter(position = position_jitter(0.2), color = "darkgray", shape =1) +   
+  geom_pointrange(aes(ymin = conditional_efficiency-se, ymax = conditional_efficiency+se, color = Group_c_lab),size =0.5, data = dt.se) +
+  scale_color_manual(values = c("#e69f00", "#009e73", "#f0e442", "#0072b2", "#d55e00"))+
+  labs(x = "", y="Mean Conditional Efficiency By Management Zone")+
+  theme(legend.title = element_blank()) +
+  theme(legend.position = "none") +
+  facet_wrap(.~ primary.zone)
+
+
+
+
+p.effbyzone.allclass <- dt.input %>% 
+  select(mdid,profit, mean.price, bait.price, fuel.price, daily.wage, resource.stock, dependence, experience,
+         vessel.age:active, primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+   ggplot(aes(primary.zone, conditional_efficiency)) + geom_boxplot() +
+   #scale_fill_manual(values = wes_palette("Darjeeling1", n = 5))+
+  labs(x = "", y="Mean Conditional Efficiency By Management Zone (All Class)")+
+  theme(legend.title = element_blank()) 
+p.effbyzone.allclass
+
+
+
+```
+
+# Manuscript table
+
+## Descriptive statistics
+
+```{r}
+dt.input %>% 
+  select(mdid, profit, mean.price,
+         fuel.price, bait.price, daily.wage,
+         resource.stock, dependence, active, experience,
+         vessel.age:traps.per.line) %>% 
+  gather(variable, values, profit:traps.per.line) %>% 
+  group_by(variable) %>% 
+  summarise(mean = mean(values, na.rm=TRUE),
+            median = median(values, na.rm=TRUE),
+            sd = sd(values, na.rm=TRUE),
+            min = min(values, na.rm = TRUE),
+            max = max(values, na.rm = TRUE)) 
+
+dt.input %>% 
+  count(primary.zone) %>% 
+  mutate(perc = n/sum(n)*100) 
+
+dt.input %>% 
+  bind_cols(., eff.c5.one) %>% 
+    select(mdid, Group_c, profit, mean.price,
+         fuel.price, bait.price, daily.wage,
+         resource.stock, dependence, active, experience,
+         vessel.age:traps.per.line) %>% 
+  gather(variable, values, profit:traps.per.line) %>% 
+  group_by(variable ,Group_c) %>% 
+  summarise(mean = mean(values, na.rm=TRUE),
+            median = median(values, na.rm=TRUE),
+            sd = sd(values, na.rm=TRUE),
+            min = min(values, na.rm = TRUE),
+            max = max(values, na.rm = TRUE)) %>% 
+  gather(indicator, values, mean:max) %>% 
+  mutate(label = paste0(indicator, "-",Group_c)) %>% 
+  select(variable, label, values) %>% 
+  spread(label, values) 
+
+```
+
+## Results
+
+```{r}
+dt.input %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  select(primary.zone, Group_c, conditional_efficiency) %>% 
+  group_by(primary.zone, Group_c) %>% 
+  summarise(obs = n(),
+            mean = mean(conditional_efficiency),
+            sd = sd(conditional_efficiency),
+            se = sd(conditional_efficiency)/sqrt(n())) %>% 
+  mutate(Group_c_lab = paste0("class-", Group_c)) %>% 
+  arrange(primary.zone) %>% 
+  select(-Group_c) %>% 
+  gather(vars, measurement, obs:se) %>% 
+  mutate(temp.varname = paste0(Group_c_lab, "_", vars)) %>% 
+  select(temp.varname, primary.zone, measurement) %>% 
+  spread(temp.varname, measurement) 
+
+dt.input %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  select(primary.zone, Group_c, conditional_efficiency) %>% 
+  group_by(primary.zone) %>% 
+  summarise(obs = n(),
+            mean = mean(conditional_efficiency),
+            sd = sd(conditional_efficiency),
+            se = sd(conditional_efficiency)/sqrt(n())) 
+
+dt.input %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  select(primary.zone, Group_c, conditional_efficiency) %>% 
+  summarise(obs = n(),
+            mean = mean(conditional_efficiency),
+            sd = sd(conditional_efficiency),
+            se = sd(conditional_efficiency)/sqrt(n()))
+```
+
+## Create table for reporting coefficient
+
+```{r}
+coef.c5.one %>% 
+  mutate(Std..Error = paste0("(", round(Std..Error, 3), ")")) %>% 
+  mutate(Coefficient = round(Coefficient, 3)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.1 & Pr...z.. > 0.05, "*", NA)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.05 & Pr...z.. > 0.01, "**", stars)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.01, "***", stars)) %>% 
+  mutate(class = c(rep(1,16), rep(2,16), rep(3, 16), rep(4,16),  rep(5,16), rep(1, 10), rep(2,10), rep(3,10), rep(4,10))) %>% 
+  mutate(Coefficient = ifelse(is.na(stars) == FALSE, paste0(Coefficient," ", stars), Coefficient)) %>% 
+  select(variables, Coefficient, Std..Error, class) %>% 
+  gather(header, coeff, Coefficient:Std..Error) %>% 
+  mutate(helper = rep(seq(1:120),2)) %>% 
+  arrange(helper) %>% 
+  select(variables, class, coeff) 
+
+marginal(restricted.mod.c5.onesided)
+coef.c5.one.extra <- coef(restricted.mod.c5.onesided, extraPar = TRUE) %>% 
+  as.matrix() %>% 
+  as.tibble(rownames = "variable") %>% 
+  rename(coef = V1) 
+
+coef.c1.one.extra <- coef(restricted.mod.c1.onesided, extraPar = TRUE) %>% 
+  as.matrix() %>% 
+  as.tibble(rownames = "variable") %>% 
+  rename(coef = V1) 
+
+
+```
+
+# Pooled model statistics
+
+```{r}
+coef.c1.one.formatted <- coef.c1.one %>% 
+  mutate(stars = ifelse(Pr...z..<=0.1 & Pr...z.. > 0.05, "*", NA)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.05 & Pr...z.. > 0.01, "**", stars)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.01, "***", stars)) 
+
+dt.input %>% 
+  bind_cols(.,restricted.mod.c1.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c1.one) %>% 
+  select(primary.zone, teJLMS) %>% 
+  group_by(primary.zone) %>% 
+  summarise(Obs = n(),
+            mean = mean(teJLMS),
+            sd = sd(teJLMS),
+            se =  sd(teJLMS)/sqrt(n())) #%>% 
+ # write_csv(., "out/eff_pooled.csv")
+
+eff.c1.one %>% 
+   summarise(Obs = n(),
+            mean = mean(teJLMS),
+            sd = sd(teJLMS),
+            se =  sd(teJLMS)/sqrt(n()))
+
+coef.c1.one %>% 
+  mutate(Std..Error = paste0("(", round(Std..Error, 3), ")")) %>% 
+  mutate(Coefficient = round(Coefficient, 3)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.1 & Pr...z.. > 0.05, "*", NA)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.05 & Pr...z.. > 0.01, "**", stars)) %>% 
+  mutate(stars = ifelse(Pr...z..<=0.01, "***", stars)) %>% 
+  mutate(Coefficient = ifelse(is.na(stars) == FALSE, paste0(Coefficient," ", stars), Coefficient)) %>% 
+  select(variables, Coefficient, Std..Error) %>% 
+  gather(header, coeff, Coefficient:Std..Error) %>% 
+  mutate(helper = rep(seq(1:16),2)) %>% 
+  arrange(helper) %>% 
+  select(variables, coeff) 
+
+summary(restricted.mod.c1.onesided)
+```
+
+## Pooled model figures
+### Mean tech pooled (not using)
+```{r}
+mean.tech.scaled.pooled <- dt.profit.lc %>% 
+  select(c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  gather(production, value, c("vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time",  "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  group_by(production) %>% 
+  summarise(mean = mean(value)) %>% 
+  mutate(production = fct_relevel(production,"vessel.age", "engine.age", "vessel.ft", "engine.hp", "num.crew", "steam.time", "soak.days", "traps.per.line", "traps.hauled.per.trip")) %>% 
+  mutate(production = recode(production, vessel.age = "Vessel age", engine.age = "Engine age", vessel.ft = "Vessel length", engine.hp = "Engine power", 
+                             num.crew = "No. of crews", steam.time = "Steam time", 
+                             traps.per.line = "No. traps per line",
+                             traps.hauled.per.trip = "Traps hauled")) %>% 
+  mutate(lab = rep("Pooled", n())) %>% 
+  ungroup() %>% 
+  spread(production, mean) 
+
+mean.tech.scaled.pooled
+
+mean.tech.scaled[1,]
+p.radar.pooled <- ggradar(
+  mean.tech.scaled.pooled[1,], 
+  values.radar = c("-1", "0", "1"),
+  grid.min = -1, grid.mid = 0, grid.max = 1.2,
+  # Polygons
+  group.line.width = 0.75, 
+  group.point.size = 2,
+  group.colours = c("#56b4e9"), 
+  # Background and grid lines
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  legend.position = "right"
+  )
+```
+
+### Updated Figure 4
+```{r}
+forFig4_lc <- dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  group_by(primary.zone) %>% 
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  ungroup() %>% 
+  select(-Group_c)
+
+forFig4_lc
+
+forFig4_combined <- dt.input %>% 
+  select(mdid,primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c1.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c1.one) %>% 
+  mutate(conditional_efficiency = teJLMS) %>% 
+  mutate(Group_c_lab = rep("Pooled", n())) %>% 
+  select(mdid, IdObs, primary.zone, conditional_efficiency, Group_c_lab) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  bind_rows(., forFig4_lc) %>% 
+  mutate(model = ifelse(Group_c_lab== "Pooled", "Pooled", "Latent Class")) %>% 
+  arrange(primary.zone, model, conditional_efficiency) %>% 
+  ungroup() %>% 
+  group_by(primary.zone, model) %>% 
+  mutate(id = row_number())
+
+eff.by.zone.model <- forFig4_combined %>% 
+  ggplot(aes(id, conditional_efficiency, color = Group_c_lab)) + geom_point(shape = 1) +
+  facet_wrap(.~ primary.zone, scales = "free_x") +
+  geom_line(aes(group = model)) +
+  scale_color_manual(values = c("#e69f00", "#009e73", "#f0e442", "#0072b2", "#d55e00", "grey50")) +
+  theme(legend.position = c(0.5, 0.1),legend.box = "horizontal", legend.title = element_blank(), ) +
+  guides(colour = guide_legend(nrow = 3)) +
+  labs(x = "", y = "Conditional Efficiency")
+
+dt.se.model <- forFig4_combined %>% 
+  add_count(model, primary.zone) %>% 
+  group_by(model, primary.zone) %>% 
+  summarise(mean = mean(conditional_efficiency, na.rm = TRUE),
+            sd = sd(conditional_efficiency, na.rm = TRUE),
+            se = sd(conditional_efficiency, na.rm = TRUE)/sqrt(n)) %>% 
+  rename(conditional_efficiency = mean)
+
+Fig4.alt2 <- forFig4_combined %>% 
+  ggplot(aes(model, conditional_efficiency, group = model)) + 
+  geom_jitter(aes(color = Group_c_lab), position = position_jitter(0.1), shape =4) +   
+  geom_pointrange(aes(ymin = conditional_efficiency-se, ymax = conditional_efficiency+se),size =0.2, data = dt.se.model) +
+  scale_color_manual(values = c("#e69f00", "#009e73", "#f0e442", "#0072b2", "#d55e00", "grey50"))+
+  labs(x = "", y="Mean Conditional Efficiency")+
+  #theme(legend.position = "top", legend.title = element_blank(), ) +
+  theme(legend.position = c(0.5, 0.15), legend.title = element_blank() ) +
+  facet_wrap(.~ primary.zone, ncol = 3)
+
+Fig4.alt2b <- forFig4_combined %>% 
+  ggplot(aes(model, conditional_efficiency, group = model)) + 
+  geom_jitter(aes(color = Group_c_lab), position = position_jitter(0.1), shape =1) +   
+  geom_pointrange(aes(ymin = conditional_efficiency-se, ymax = conditional_efficiency+se),size =0.2, data = dt.se.model) +
+  scale_color_manual(values = c("#e69f00", "#009e73", "#f0e442", "#0072b2", "#d55e00", "grey50"))+
+  labs(x = "", y="Mean Conditional Efficiency")+
+  #theme(legend.position = "top", legend.title = element_blank(), ) +
+  theme(legend.position = "top", legend.title = element_blank() ) +
+  facet_grid(.~ primary.zone)
+
+```
+
+## Zone map
+
+```{r}
+zone_spdf <- readOGR( 
+  dsn= file.path("data/shapefiles/LobsterZones/"), 
+  layer="DMR_Lobster_Zones",
+  verbose=FALSE
+)
+
+ogrInfo(dsn = file.path("data/shapefiles/LobsterZones/"),
+        layer = "DMR_Lobster_Zones")
+
+spdf_fortified <- tidy(zone_spdf)
+
+cent <- gCentroid(zone_spdf, byid = TRUE) 
+cnames <- cent@coords %>% 
+  as.data.frame() %>% 
+  rename(long = x, lat = y) %>% 
+  arrange(desc(long)) %>% 
+  mutate(id = c("A", "B", "C","D","E","F","G"))
+
+# Plot it
+zone_map <- ggplot() +
+  geom_polygon(data = spdf_fortified, aes( x = long, y = lat, group = group), fill = "white", color="gray50") +
+  geom_text(data = cnames, aes(x = long, y = lat, label = id), size = 4) +
+  theme_void() 
+
+zone_map
+
+```
+
+
+## Combined radar chart
+```{r}
+p.stacked.region <- dt.input %>% 
+  select(mdid,profit, mean.price, bait.price, fuel.price, daily.wage, resource.stock, dependence, experience,
+         vessel.age:active, primary.zone) %>% 
+  filter(complete.cases(.)) %>% 
+  bind_cols(.,restricted.mod.c5.onesided$dataTable[,1]) %>% 
+  bind_cols(., eff.c5.one) %>% 
+  mutate(conditional_efficiency = teJLMS_c) %>% 
+  select(mdid, IdObs, primary.zone, Group_c, conditional_efficiency) %>% 
+  mutate(primary.zone = recode(primary.zone,"Zone A", "Zone B", "Zone C", "Zone D", "Zone E", "Zone F", "Zone G")) %>% 
+  mutate(region = ifelse(primary.zone == "Zone A" | primary.zone == "Zone B" | primary.zone == "Zone C", "Northeast", "Southwest")) %>%
+  mutate(Group_c_lab = paste0("Class-", Group_c)) %>% 
+  group_by(region, Group_c_lab) %>% 
+  summarise(count = n()) %>% 
+  ungroup() %>% 
+  group_by(region) %>% 
+  mutate(perc = count/sum(count))  %>%
+  mutate(lab = paste(count, " (", round(perc*100, digits =0),"%)")) %>% 
+  ggplot(aes(x = factor(region), y = count, fill = factor(Group_c_lab), label = lab)) +
+  geom_bar(position="stack", stat = "identity", width = 0.7) +
+  labs(x = "", y = "Class composition by region", fill = "Group_c_lab") +
+  scale_fill_manual(values = alpha(c("#e69f00", "#009e73", "#f0e442", "#0072b2", "#d55e00"),  0.8))+
+  geom_text(size = 4, position = position_stack(vjust = 0.5), color = "black") +
+  theme(legend.position = "top") +
+  theme(legend.title = element_blank(), axis.text=element_text(size=18), axis.title=element_text(size=18), 
+        strip.text.x = element_text(size = 18))
+```
+
+
